@@ -1,0 +1,14 @@
+{
+  "name": "baobaolong",
+  "version": "1.0.0",
+  "description": "私人助理及多端交互 monorepo",
+  "private": true,
+  "scripts": {
+    "dev:server": "pnpm --filter server run dev",
+    "build": "pnpm -r run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.11.0"
+  }
+}

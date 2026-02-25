@@ -1,0 +1,14 @@
+{
+    "mcpServers": {
+        "fast-filesystem": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "fast-filesystem-mcp"
+            ],
+            "env": {
+                "CREATE_BACKUP_FILES": "true"
+            }
+        }
+    }
+}

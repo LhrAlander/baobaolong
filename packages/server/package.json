@@ -1,0 +1,21 @@
+{
+    "name": "server",
+    "version": "1.0.0",
+    "description": "私人助理后端服务",
+    "main": "src/index.ts",
+    "scripts": {
+        "dev": "cross-env NODE_ENV=development tsx watch src/index.ts",
+        "start": "cross-env NODE_ENV=production tsx src/index.ts"
+    },
+    "dependencies": {
+        "@google/genai": "^1.42.0",
+        "@modelcontextprotocol/sdk": "^1.27.1",
+        "cross-env": "^10.1.0",
+        "dotenv": "^17.3.1",
+        "node-fetch": "^3.3.2",
+        "zhipuai": "^2.0.0"
+    },
+    "devDependencies": {
+        "tsx": "^4.7.0"
+    }
+}

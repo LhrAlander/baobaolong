@@ -1,0 +1,7 @@
+{
+    "name": "client",
+    "version": "1.0.0",
+    "description": "多端交互应用 (Web/Android/iOS)",
+    "dependencies": {},
+    "devDependencies": {}
+}
