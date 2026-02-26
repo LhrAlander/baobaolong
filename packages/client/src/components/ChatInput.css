@@ -1,0 +1,111 @@
+.chat-input-container {
+    display: flex;
+    align-items: flex-end;
+    background-color: var(--bg-secondary);
+    border-radius: 24px;
+    padding: 8px 12px;
+    gap: 8px;
+    border: 1px solid var(--border-color);
+    transition: border-color 0.2s, box-shadow 0.2s;
+    position: relative;
+    z-index: 10;
+}
+
+.chat-input-container:focus-within {
+    border-color: rgba(168, 199, 250, 0.4);
+    box-shadow: 0 0 0 2px rgba(168, 199, 250, 0.1);
+}
+
+.chat-input-container.disabled {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+.input-actions-left,
+.input-actions-right {
+    display: flex;
+    align-items: center;
+    padding-bottom: 4px;
+    /* Align with bottom of single-line textarea */
+}
+
+.icon-btn-small {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+    transition: background-color 0.2s, color 0.2s;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+}
+
+.icon-btn-small:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.textarea-wrapper {
+    flex: 1;
+    display: flex;
+    align-items: center;
+}
+
+textarea {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 1rem;
+    line-height: 1.5;
+    padding: 8px 0;
+    resize: none;
+    max-height: 200px;
+    outline: none;
+    box-sizing: border-box;
+}
+
+textarea::placeholder {
+    color: var(--text-tertiary);
+}
+
+.send-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--text-primary);
+    color: var(--bg-primary);
+    border: none;
+    cursor: pointer;
+    transition: transform 0.2s, opacity 0.2s;
+    opacity: 0;
+    transform: scale(0.8);
+}
+
+.send-btn.show {
+    opacity: 1;
+    transform: scale(1);
+}
+
+.send-btn:hover {
+    background-color: var(--accent-color);
+    color: var(--bg-primary);
+}
+
+.send-btn:disabled {
+    background-color: var(--bg-hover);
+    color: var(--text-tertiary);
+    cursor: not-allowed;
+}
+
+.mic-btn {
+    /* Only show mic when no text */
+    transition: opacity 0.2s, transform 0.2s;
+}

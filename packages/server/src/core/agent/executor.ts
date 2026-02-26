@@ -2,6 +2,7 @@ import { ILLMProvider } from '../llm/interfaces.js';
 import { ChatMessage, ChatOptions } from '../llm/types.js';
 import { SkillRegistry } from '../skills/registry.js';
 import { ISkill } from '../skills/types.js';
+import { MemorySummarizer } from '../memory/summarizer.js';
 
 export interface AgentExecuteOptions extends ChatOptions {
     /** 本次执行最多允许大模型连续挂起并调用的次数，防止陷入由于参数错误导致的无限请求死循环 */
@@ -14,6 +15,7 @@ export class AgentExecutor {
     constructor(
         private readonly llm: ILLMProvider,
         private readonly skillRegistry: SkillRegistry,
+        private readonly summarizer?: MemorySummarizer
     ) { }
 
     /**
@@ -60,8 +62,20 @@ export class AgentExecutor {
             // 如果没有返回 toolCalls，代表大模型认为思考完毕，直接输出总结
             if (!response.toolCalls || response.toolCalls.length === 0) {
                 console.log(`[Agent Executor] 思考完毕，得出最终结论。`);
-                // 可选：将最终回复也压入栈（如果要支持多轮连续聊天记忆的话），目前由于通常在最外层上层服务合并，这里可选
-                return response.content;
+
+                const finalReply = response.content;
+                // 将最终回复也压入栈（保证后台总结能吃到完整的来回上下文）
+                initialMessages.push({ role: 'assistant', content: finalReply });
+
+                // --- 触发生命周期挂钩: Strategy B (Out-of-Band) 无感记笔记阶段 ---
+                // 不使用 await 阻塞返回！让他在后台默默压缩整段回忆 (只对具备一定长度的闲聊归档)
+                if (this.summarizer && initialMessages.length >= 4) {
+                    this.summarizer.summarizeAndArchive([...initialMessages]).catch(err => {
+                        console.error('[AgentExecutor] 后台归档记录流水账失败', err.message);
+                    });
+                }
+
+                return finalReply;
             }
 
             console.log(`[Agent Executor] 决定挂起并执行动作 (Action) -> 工具数: ${response.toolCalls.length}`);
@@ -75,9 +89,37 @@ export class AgentExecutor {
 
             // 检测当前总大小是否逼近红线
             const currentLength = this.estimateContextLength(initialMessages);
-            const isApproachingLimit = currentLength > threshold;
-            if (isApproachingLimit) {
-                console.warn(`[Agent Executor] ⚠️ 警告：检测到当前上下文长度为 ${currentLength}，即将触达设定的高压红线 (${threshold})。开启 Tool 返回值截断机制！`);
+            let isApproachingLimit = currentLength > threshold;
+
+            // --- 动态滑动窗口压缩机制 (Context Compaction) ---
+            // 如果即将要涨破上限，并且配置了 summarizer 且记录条数足量，就不光截断，还把历史缩写
+            if (isApproachingLimit && this.summarizer) {
+                console.warn(`[Agent Executor] ⚠️ 警告：当前上下文长度 ${currentLength} 触达安全红线 (${threshold})。开启滑动窗口浓缩机制以自救...`);
+                // 1. 保留最前面 1 条 (或者是 system prompt / 起点) 和最后面 1 条 (最新的 user query)
+                const keepersStart = 1;
+                const keepersEnd = 1;
+                const sliceToCompact = initialMessages.slice(keepersStart, initialMessages.length - keepersEnd);
+
+                // 2. 执行强力压缩！
+                let compactedSummary = await this.summarizer.compactContext(sliceToCompact);
+                console.log(`[Agent Executor] 压缩完成！分析结果: ${compactedSummary.substring(0, 50)}...`);
+
+                // 3. 抹除中间的历史记录，用一段极简的代理记忆代替
+                if (compactedSummary.includes('[无关键事实留存]')) {
+                    compactedSummary = '检测到这段记录为闲扯或系统循环报文，已自动清退释放内存。';
+                }
+
+                initialMessages.splice(keepersStart, sliceToCompact.length, {
+                    role: 'assistant', // 以系统助理的身份留下前情提要
+                    content: `[系统内存保护自动折叠]: 前面的交流内容已被压缩收拢如下:\n${compactedSummary}`
+                });
+
+                // 重新评估状态：压缩完之后可能完全恢复绿线，不再需要走硬截断
+                const newLength = this.estimateContextLength(initialMessages);
+                console.log(`[Agent Executor] 危机解除，Token 量从 ${currentLength} 下拉至 ${newLength}。`);
+                isApproachingLimit = newLength > threshold;
+            } else if (isApproachingLimit) {
+                console.warn(`[Agent Executor] ⚠️ 警告：检测到当前上下文长度为 ${currentLength} 逼近上限。将开启 Tool 返回值截断机制保护模型不死。`);
             }
 
             // 执行所有的并行 toolCalls (标准情况模型通常会下发一个，并发版本支持多个)
@@ -117,6 +159,14 @@ export class AgentExecutor {
 
         // 触达强行终止保护底线
         console.warn(`[Agent Executor] 达到最大死循环保护次数 (${maxSteps})，强制中止！`);
+
+        // 即便死循环失败，有价值的前置探索部分我们也尝试归档
+        if (this.summarizer && initialMessages.length >= 4) {
+            this.summarizer.summarizeAndArchive([...initialMessages]).catch(err => {
+                console.error('[AgentExecutor] 后台归档探索失败的记录异常', err.message);
+            });
+        }
+
         return "非常抱歉，我尝试了多次探索依旧无法获得足够解答您的信息，系统中止了我的思考流程。";
     }
 }

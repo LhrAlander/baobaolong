@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "dev:server": "pnpm --filter server run dev",
+    "dev:gui": "pnpm --filter client run dev",
     "build": "pnpm -r run build"
   },
   "devDependencies": {
