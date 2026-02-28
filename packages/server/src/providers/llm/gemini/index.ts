@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { ILLMProvider } from '../../../core/llm/interfaces.js';
-import { ChatMessage, ChatOptions, ChatResponse } from '../../../core/llm/types.js';
+import { ChatMessage, ChatOptions, ChatResponse, ModelConfig } from '../../../core/llm/types.js';
 import { ISkill } from '../../../core/skills/types.js';
 import { geminiConfig } from './config.js';
 
@@ -170,5 +170,20 @@ export class GeminiProvider implements ILLMProvider {
                 yield chunk.text;
             }
         }
+    }
+    getModelConfig(): ModelConfig {
+        return {
+            contextWindow: 1048576, // Gemini 1.5 Pro 有 1M 上下文
+            maxOutputTokens: 8192,
+            safetyBuffer: 2000
+        };
+    }
+
+    estimateTokenCount(messages: ChatMessage[]): number {
+        return messages.reduce((acc, msg) => {
+            const contentLen = msg.content ? msg.content.length : 0;
+            const toolLen = msg.tool_calls ? JSON.stringify(msg.tool_calls).length : 0;
+            return acc + contentLen + toolLen + 10;
+        }, 0);
     }
 }

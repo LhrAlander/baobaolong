@@ -1,5 +1,5 @@
 import { ILLMProvider } from '../../../core/llm/interfaces.js';
-import { ChatMessage, ChatOptions, ChatResponse } from '../../../core/llm/types.js';
+import { ChatMessage, ChatOptions, ChatResponse, ModelConfig } from '../../../core/llm/types.js';
 import { openaiConfig } from './config.js';
 
 export class OpenAIProvider implements ILLMProvider {
@@ -23,5 +23,20 @@ export class OpenAIProvider implements ILLMProvider {
             await new Promise(r => setTimeout(r, 100));
             yield w;
         }
+    }
+    getModelConfig(): ModelConfig {
+        return {
+            contextWindow: 128000,
+            maxOutputTokens: 4096,
+            safetyBuffer: 1000
+        };
+    }
+
+    estimateTokenCount(messages: ChatMessage[]): number {
+        return messages.reduce((acc, msg) => {
+            const contentLen = msg.content ? msg.content.length : 0;
+            const toolLen = msg.tool_calls ? JSON.stringify(msg.tool_calls).length : 0;
+            return acc + contentLen + toolLen + 10;
+        }, 0);
     }
 }

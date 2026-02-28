@@ -4,11 +4,11 @@ import { LLMFactory } from './core/llm/factory.js';
 import { GeminiProvider } from './providers/llm/gemini/index.js';
 import { GLMProvider } from './providers/llm/glm/index.js';
 import { globalSkillRegistry } from './core/skills/registry.js';
-import { memorizeCoreFactSkill, recallPastContextSkill, memoryAdapter } from './skills/memory/index.js';
-import { ChatMessage } from './core/llm/types.js';
+import { recallSessionContextSkill } from './skills/memory/local_session_recall.js';
+import { memorizeUserFactSkill } from './skills/memory/memorize_user_fact.js';
+import { recallUserMemorySkill } from './skills/memory/recall_user_memory.js';
 import { AgentExecutor } from './core/agent/executor.js';
 import { MCPManager } from './core/mcp/manager.js';
-import { MemorySummarizer } from './core/memory/summarizer.js';
 import { FileSessionAdapter } from './core/session/adapters/file.js';
 import { SessionManager } from './core/session/manager.js';
 import * as path from 'path';
@@ -21,8 +21,9 @@ async function main() {
         LLMFactory.register('gemini', new GeminiProvider());
         LLMFactory.register('glm', new GLMProvider());
 
-        globalSkillRegistry.register(memorizeCoreFactSkill);
-        globalSkillRegistry.register(recallPastContextSkill);
+        globalSkillRegistry.register(recallSessionContextSkill);
+        globalSkillRegistry.register(memorizeUserFactSkill);
+        globalSkillRegistry.register(recallUserMemorySkill);
 
         console.log('[系统] 正在读取 mcp.config.json 并在本地组装远端技能桥接层...');
         const mcpManager = new MCPManager();
@@ -32,11 +33,10 @@ async function main() {
 
         const assistant = LLMFactory.get('glm');
 
-        const summarizer = new MemorySummarizer(assistant, memoryAdapter);
-        const agent = new AgentExecutor(assistant, globalSkillRegistry, summarizer);
+        const agent = new AgentExecutor(assistant, globalSkillRegistry);
 
         const sessionAdapter = new FileSessionAdapter();
-        const sessionManager = new SessionManager(sessionAdapter, agent, summarizer, memoryAdapter);
+        const sessionManager = new SessionManager(sessionAdapter, agent);
 
         // --- 第十一阶段: 启动 HTTP 与 WebSocket 混合网关 ---
         const httpServer = createServer((req, res) => {
@@ -44,7 +44,7 @@ async function main() {
             res.end('Antigravity Private Assistant API Server is running...\n');
         });
 
-        setupWebSocketServer(httpServer, sessionManager, sessionAdapter, memoryAdapter);
+        setupWebSocketServer(httpServer, sessionManager, sessionAdapter);
 
         const PORT = process.env.PORT || 3000;
         httpServer.listen(PORT, () => {

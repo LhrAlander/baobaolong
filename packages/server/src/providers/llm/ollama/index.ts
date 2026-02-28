@@ -1,5 +1,5 @@
 import { ILLMProvider } from '../../../core/llm/interfaces.js';
-import { ChatMessage, ChatOptions, ChatResponse } from '../../../core/llm/types.js';
+import { ChatMessage, ChatOptions, ChatResponse, ModelConfig } from '../../../core/llm/types.js';
 import { ollamaConfig } from './config.js';
 
 export class OllamaProvider implements ILLMProvider {
@@ -22,5 +22,20 @@ export class OllamaProvider implements ILLMProvider {
             await new Promise(r => setTimeout(r, 50));
             yield char;
         }
+    }
+    getModelConfig(): ModelConfig {
+        return {
+            contextWindow: 8192, // 本地模型默认保守值
+            maxOutputTokens: 2048,
+            safetyBuffer: 500
+        };
+    }
+
+    estimateTokenCount(messages: ChatMessage[]): number {
+        return messages.reduce((acc, msg) => {
+            const contentLen = msg.content ? msg.content.length : 0;
+            // 粗略认定 1 汉字 ≈ 1 Token，1 英文单词 ≈ 0.3 Token，简单取长度作为顶层兜底
+            return acc + contentLen + 10;
+        }, 0);
     }
 }

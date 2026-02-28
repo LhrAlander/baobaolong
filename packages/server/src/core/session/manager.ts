@@ -1,58 +1,77 @@
 import { AgentExecuteOptions, AgentExecutor } from '../agent/executor.js';
 import { ChatMessage, ChatOptions } from '../llm/types.js';
-import { MemorySummarizer } from '../memory/summarizer.js';
 import { ISessionStorage, SessionData } from './interfaces.js';
-import { IMemoryStorage } from '../memory/interfaces.js';
+import { MemoryService, globalMemoryService } from '../memory/index.js';
+import { globalProfileManager } from '../memory/profile.js';
 
 export class SessionManager {
-    // 设置触发新一轮滚动的阈值 (比如当新增了 10 条对话，且 Token 压力大时触发组装压缩)
-    private readonly NEW_MESSAGES_ROLLING_THRESHOLD = 10;
-
     constructor(
         private readonly storage: ISessionStorage,
         private readonly executor: AgentExecutor,
-        private readonly summarizer: MemorySummarizer,
-        private readonly memoryStorage: IMemoryStorage
+        private readonly memoryService: MemoryService = globalMemoryService
     ) { }
 
-    /**
-     * 接管外层网络请求的核心入口：处理一条来自用户的新消息
-     */
     public async handleMessage(sessionId: string, userText: string, options?: AgentExecuteOptions): Promise<string> {
         // 1. 获取原汁原味的生切历史字典
         let session = await this.storage.loadSession(sessionId);
+        let isNewSession = !session || session.messages.length === 0;
+
         if (!session) {
+            isNewSession = true;
             session = {
                 sessionId,
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
-                messages: [],
-                rollingSummaries: []
+                messages: []
             };
         }
 
-        // 2. 将用户最新说的话追加进入 Raw Data (持久化字典)
+        // 2. 将用户最新说的话追加进入 Raw Data
         session.messages.push({ role: 'user', content: userText });
         session.updatedAt = Date.now();
 
-        // 3. 构建临时视窗上下文 (Context Assembling)
-        const contextWindow = await this.assembleContextWindow(session);
+        // 3. 构建临时发包视窗：抽出包含动态人设的组装数组 (不污染数据库的 messages)
+        let contextWindow: ChatMessage[] = [];
+        try {
+            contextWindow = await this.assembleContextWindow(session, isNewSession);
+        } catch (e: any) {
+            // 如果是因为空人设被主动拦截的，直接拦截下来并将特殊话语作为大模型的正常回答返回
+            if (e.message === 'REQUIRE_USER_PROFILE') {
+                await this.storage.saveSession(sessionId, session);
+                const requireGreeting = "您好！我是您的私人智能助理。这似乎是我们第一次深入交流，在正式为您服务之前，请详细描述一下：您是谁？您目前所在的行业和日常关注的领域是什么？以及您对我接下来的服务有什么特定的要求或忌讳？\n\n（您的这些设定我将永久牢记并在后续为您量身定制每一次答复）";
+                session.messages.push({ role: 'assistant', content: requireGreeting });
+                return requireGreeting;
+            }
+            throw e; // 其他真正因网络断开等问题的错误继续往外抛出
+        }
+
+        // 确保将最新组装出的 System Prompt 写入原始 session 数据中，避免丢失
+        const systemMsg = contextWindow.find(m => m.role === 'system');
+        if (systemMsg) {
+            // 剔除可能存在的旧版 system，保证首位是最新的系统设定
+            session.messages = session.messages.filter(m => m.role !== 'system');
+            session.messages.unshift(systemMsg);
+        }
+
         const originalRefs = new Set(contextWindow);
 
-        // 4. 将极度纯净且处于安全体积内的临时视窗抛给 Agent Executor 进行地狱思考
-        console.log(`[Session Manager] 拼装完毕，向主力模型喂入 ${contextWindow.length} 条有效上下文 (已包含被折叠的纪元记忆)。`);
+        // 4. 将纯净的数组抛给 Agent Executor 进行运算，它会在内部自动截断滑窗，并在此数组尾部追加新副产品
+        console.log(`[Session Manager] 向智能体投入包含了 System Prompt 强设定的总历史：${contextWindow.length} 条。`);
 
         let finalAnswer = "";
         try {
-            // Executor 的 execute 是原地修改数组并将 finalAnswer 作为返回值的
-            finalAnswer = await this.executor.execute(contextWindow, options);
+            const executeOptions: AgentExecuteOptions = {
+                ...options,
+                sessionId: sessionId
+            };
+            finalAnswer = await this.executor.execute(contextWindow, executeOptions);
         } catch (error: any) {
             console.error(`[Session Manager] Executor 执行崩溃:`, error);
             finalAnswer = "系统处理您的请求时遭遇了错误，请稍后再试。";
             contextWindow.push({ role: 'assistant', content: finalAnswer }); // 补上异常回复
         }
 
-        // 5. 剥离并归档新产生的副产品 (Tool 调用日志 和 Final Answer)
+        // 5. 将 Agent 在思考途中新生成的 Tool Call 和 回答分离出来同步给持久化字典
         this.syncNewContextToSessionRow(session, contextWindow, originalRefs);
 
         // 6. 落盘写数据库/JSON 文件
@@ -62,108 +81,82 @@ export class SessionManager {
     }
 
     /**
-     * 智能组装视窗：从成百上千条长对话中提取缓存的 "上片回忆录" 并合并新消息
+     * 组装带前置 Prompt 的临时上下文
      */
-    private async assembleContextWindow(session: SessionData): Promise<ChatMessage[]> {
-        const rawMessages = session.messages;
-        if (rawMessages.length === 0) return [];
-
-        if (!session.rollingSummaries) {
-            session.rollingSummaries = [];
-        }
-
-        // 找出已被压缩过的最大的下标
-        const lastIncludedIndex = session.rollingSummaries.length > 0
-            ? session.rollingSummaries[session.rollingSummaries.length - 1].endIndex
-            : -1;
-
-        // 我们当前还没被压进 "纪元回忆录" 里的新孤儿聊天数量
-        const uncompressedCount = rawMessages.length - 1 - lastIncludedIndex;
-
-        // 如果孤儿消息堆积太多，立刻呼叫 Summarizer 触发增量纪元生成
-        if (uncompressedCount > this.NEW_MESSAGES_ROLLING_THRESHOLD && lastIncludedIndex < rawMessages.length - 2) {
-            console.log(`[Session Manager] 探测到大量的新增口水流未压缩 (${uncompressedCount}条)，开始生成第 ${session.rollingSummaries.length + 1} 纪元...`);
-
-            // 抽出这批等待被压缩的新增流（除开最新的一句）
-            const targetSlice = rawMessages.slice(lastIncludedIndex + 1, rawMessages.length - 1);
-
-            let priorContext = "";
-            if (session.rollingSummaries.length > 0) {
-                priorContext = `(前情提要：${session.rollingSummaries.map(r => r.content).join('\n')})\n\n`;
-            }
-
-            // 我们构造一段强力 Prompt 丢给 summarizer
-            const pseudoSlice = [...targetSlice];
-            pseudoSlice.unshift({
-                role: 'system',
-                content: `请结合我们的前情提要，总结接下来的这段新进展：\n${priorContext}`
-            });
-
-            const newContent = await this.summarizer.compactContext(pseudoSlice);
-            if (!newContent.includes('[无关键事实留存]')) {
-                session.rollingSummaries.push({
-                    content: newContent,
-                    startIndex: lastIncludedIndex + 1,
-                    endIndex: rawMessages.length - 2
-                });
-                console.log(`[Session Manager] 纪元记录生成完毕。`);
-            } else {
-                session.rollingSummaries.push({
-                    content: "该时间段内系统进行了例行互动或无意义闲聊，无关键决策跃进。",
-                    startIndex: lastIncludedIndex + 1,
-                    endIndex: rawMessages.length - 2
-                });
-            }
-        }
-
-        // --- 组装最终向 LLM 发送的窗户 ---
+    private async assembleContextWindow(session: SessionData, isNewSession: boolean): Promise<ChatMessage[]> {
         const assembledWindow: ChatMessage[] = [];
 
-        // 1. 前置读取用户的长期记忆档案 (Core Memory) 并作为最顶层 System Prompt
-        let coreSystemPrompt = "你是私人智能助理，请严格依据以下主人的核心偏好进行服务：\n\n";
+        if (isNewSession) {
 
-        let hasCoreMemory = false;
-        try {
-            const userProfile = await this.memoryStorage.get('core', 'user_profile');
-            const systemInst = await this.memoryStorage.get('core', 'system_instructions');
+            // 从 JSON 提取硬性名字设定
+            const userProfile = await globalProfileManager.getUserProfile('default_user');
+            const agentProfile = await globalProfileManager.getAgentProfile('default_agent');
 
-            if (userProfile) {
-                coreSystemPrompt += `[用户画像与偏好]:\n${userProfile}\n\n`;
-                hasCoreMemory = true;
+            const userName = userProfile.name || '用户(暂未知姓名)';
+            const agentName = agentProfile.name || 'AI助理(暂未知姓名)';
+
+            // 1. 尝试动态访问 Mem0 核心记忆拼装 System Prompt 人设
+            let coreSystemPrompt = `作为一个极其专业的私人助理，你需要清晰地划清身份边界，避免在使用外部记忆库时产生代词混淆。
+【当前会话身份确立】
+- 当你在交流中看到用户自称“我”时，请自动将其替换为用户的硬性设定姓名：[ ${userName} ]。
+- 当用户在交流中称呼“你”时，指的是你本人，你的硬性设定姓名是：[ ${agentName} ]。
+
+【记忆库交互铁律】
+外部记忆图谱是一个没有上下文、无法理解“你/我”是谁的独立盲盒系统。
+当你调用任何带有 "存储" 或 "检索" 记忆性质的工具时，**你必须站在上帝般的第三方观察者视角**去构建参数：
+❌ 错误搜索/写入参数："我想去北京旅游" 或 "你以后都要用全小写字母"。
+✅ 正确搜索/写入参数："[ ${userName} ]计划去北京旅游" 或 "${userName}要求[ ${agentName} ]以后回复需要用全小写字母"。
+绝对禁止在调用存储与检索记忆的引擎中出现“我”、“你”、“他”等主观指代词汇！
+
+`;
+            let hasCoreMemory = false;
+
+            try {
+                // 目前默认获取全局关于该用户的偏好设定（可以通过预先设定的 query 如 'user profiles' 来抽取）
+                const memResults = await this.memoryService.searchRelatedMemories({
+                    query: "用户的性格、职业、喜好等基本核心画像是什么？",
+                    user_id: 'default_user'
+                });
+
+                if (memResults && (memResults.results.length > 0 || memResults.relations.length > 0)) {
+
+                    // 去除可能完全跑偏或者太弱关联的记忆（可选过滤），这里直接拼接
+                    const facts = memResults.results.map(r => r.memory).join('\n- ');
+                    const relations = memResults.relations.map(r => `${r.source} ${r.relationship} ${r.target}`).join('\n- ');
+                    if (facts || relations) {
+                        coreSystemPrompt += `请依据以下系统为您预先检索到的历史核心画像进行服务：\n`;
+                    }
+                    if (facts) {
+                        hasCoreMemory = true;
+                        coreSystemPrompt += `[检索到的关于主人的偏好、身份与事实记忆]:\n- ${facts}\n\n`;
+                    }
+
+                    // 2. 检查：如果是新会话，而且连一丢丢 Core Memory 结果都没搜刮出来说明是新号
+                    if (isNewSession && !hasCoreMemory) {
+                        throw new Error("REQUIRE_USER_PROFILE");
+                    }
+
+                    if (relations) {
+                        coreSystemPrompt += `[关联的人物物件知识图谱]:\n- ${relations}\n\n`;
+                    }
+                } else {
+                    // 如果后端服务连空壳数组都没给，或者网络异常导致拿不到，也抛锚
+                    throw new Error("REQUIRE_USER_PROFILE");
+                }
+            } catch (e: any) {
+                // 将上面主动 throw 的特殊标签冒泡出去，其余的普通错误打印吞吐
+                console.error('[Session Manager] 提取 Mem0 记忆失败:', e);
+                if (e.message === "REQUIRE_USER_PROFILE") throw e;
             }
-            if (systemInst) {
-                coreSystemPrompt += `[系统铁律]:\n${systemInst}\n\n`;
-                hasCoreMemory = true;
-            }
-        } catch (e) {
-            console.error('[Session Manager] 提取 Core Memory 失败', e);
-        }
 
-        if (hasCoreMemory) {
+            // 如果真的什么也没拉到，塞一个保底兜底人设
+            if (!hasCoreMemory) {
+                // coreSystemPrompt = "你是私人智能助理，请保持耐心、礼貌、以及极致的技术专业度进行回答。";
+            }
+
             assembledWindow.push({ role: 'system', content: coreSystemPrompt.trim() });
         }
-
-        // 1.5 补上数组里的默认防挂提示词 (如果你最初始有设置 system 角色的话)
-        if (rawMessages[0]?.role === 'system') {
-            assembledWindow.push(rawMessages[0]);
-        }
-
-        // 2. 将前面所有已经生成的连环回忆录，折叠成一句话插入中间
-        if (session.rollingSummaries && session.rollingSummaries.length > 0) {
-            const fusedStory = session.rollingSummaries.map((s, idx) => `[往事纪元 ${idx + 1}卷]：\n${s.content}`).join('\n\n');
-            assembledWindow.push({
-                role: 'assistant',
-                content: `[系统内存保护折叠区] 以下是本会话开启以来的所有历史提要：\n\n${fusedStory}`
-            });
-        }
-
-        // 3. 将尾部那几个还没熟的新对话原样塞入
-        const activeEndIndex = session.rollingSummaries.length > 0
-            ? session.rollingSummaries[session.rollingSummaries.length - 1].endIndex
-            : (rawMessages[0]?.role === 'system' ? 0 : -1);
-
-        const activeTails = rawMessages.slice(activeEndIndex + 1);
-        assembledWindow.push(...activeTails);
+        assembledWindow.push(...session.messages);
 
         return assembledWindow;
     }
@@ -172,15 +165,22 @@ export class SessionManager {
      * 将 Agent 运行期间向视窗中新写入的历史，安全剥离出并推向原纪录文件
      */
     private syncNewContextToSessionRow(session: SessionData, finishedWindow: ChatMessage[], originalRefs: Set<ChatMessage>) {
-        // 利用对象引用的唯一性：所有没在 originalRefs 里出现过的 ChatMessage
-        // 必定是 AgentExecutor 在执行 execute 的这段时间里 newly pushed 的产物！
-        // （包括 ToolCalls、ToolReplies、中间可能出现的折叠占位符以及最后的 FinalAnswer）
-
         const newProduced = finishedWindow.filter(msg => !originalRefs.has(msg));
 
         if (newProduced.length > 0) {
             session.messages.push(...newProduced);
-            console.log(`[Session Manager] 成功从临时视窗中剥离出 ${newProduced.length} 条增量线索并完成归档。`);
+            console.log(`[Session Manager] 成功从临时视窗中提取 ${newProduced.length} 条增量记录并归档。`);
+
+            // 提取对话中含金量较高的部分（纯用户和助手的问答）异步上报给 Mem0 以供图谱萃取
+            const lastUserMsg = session.messages.slice().reverse().find(m => m.role === 'user');
+            const pureAssistantMsgs = newProduced.filter(m => m.role === 'assistant' && !m.tool_calls);
+
+            if (lastUserMsg && pureAssistantMsgs.length > 0) {
+                this.memoryService.storeMessages({
+                    messages: [lastUserMsg, ...pureAssistantMsgs],
+                    user_id: 'default_user'
+                }).catch(e => console.error('[Session Manager] 异步存储记忆至 Mem0 失败:', e));
+            }
         }
     }
 }

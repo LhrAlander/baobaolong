@@ -1,19 +1,28 @@
 import { ZhipuAI } from 'zhipuai';
 import fetch from 'node-fetch';
 import { ILLMProvider } from '../../../core/llm/interfaces.js';
-import { ChatMessage, ChatOptions, ChatResponse } from '../../../core/llm/types.js';
+import { ChatMessage, ChatOptions, ChatResponse, ModelConfig } from '../../../core/llm/types.js';
 import { ISkill } from '../../../core/skills/types.js';
-import { glmConfig } from './config.js';
+import { glmConfig, glmModelDict } from './config.js';
 
 export class GLMProvider implements ILLMProvider {
     private client: ZhipuAI;
+    private readonly currentModel: string;
+    private readonly currentConfig: ModelConfig;
 
-    constructor() {
+    constructor(model?: string) {
+        this.currentModel = model || glmConfig.model;
+        this.currentConfig = glmModelDict[this.currentModel] || glmModelDict['default'];
+
         this.client = new ZhipuAI({
             apiKey: glmConfig.apiKey,
             fetch: fetch as any
         });
-        console.log(`[GLM] zhipuai SDK 初始化完成`);
+        console.log(`[GLM] zhipuai SDK 初始化完成, 已绑定模型: ${this.currentModel} (Win: ${this.currentConfig.contextWindow})`);
+    }
+
+    exactTokenCount?(messages: ChatMessage[]): Promise<number> {
+        throw new Error('Method not implemented.');
     }
 
     // 将通用的 ChatMessage 转换为 智谱 需要的 messages 对象
@@ -60,7 +69,7 @@ export class GLMProvider implements ILLMProvider {
     }
 
     async chat(messages: ChatMessage[], options?: ChatOptions): Promise<ChatResponse> {
-        const modelTarget = options?.model || glmConfig.model;
+        const modelTarget = options?.model || this.currentModel;
         const reqMessages = this.mapMessages(messages);
         const mappedTools = this.mapTools(options?.tools);
 
@@ -109,7 +118,7 @@ export class GLMProvider implements ILLMProvider {
 
     async *stream(messages: ChatMessage[], options?: ChatOptions): AsyncIterable<string> {
         console.log('[GLM] stream');
-        const modelTarget = options?.model || glmConfig.model;
+        const modelTarget = options?.model || this.currentModel;
         const reqMessages = this.mapMessages(messages);
         const mappedTools = this.mapTools(options?.tools);
 
@@ -138,5 +147,17 @@ export class GLMProvider implements ILLMProvider {
                 yield text;
             }
         }
+    }
+
+    getModelConfig(): ModelConfig {
+        return this.currentConfig;
+    }
+
+    estimateTokenCount(messages: ChatMessage[]): number {
+        return messages.reduce((acc, msg) => {
+            const contentLen = msg.content ? msg.content.length : 0;
+            const toolLen = msg.tool_calls ? JSON.stringify(msg.tool_calls).length : 0;
+            return acc + contentLen + toolLen + 10;
+        }, 0);
     }
 }

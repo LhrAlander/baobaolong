@@ -43,11 +43,22 @@ export interface ChatResponse {
 
     /** 如果模型没有回复文本而是挂起要求调用系统函数，会返回该集合 */
     toolCalls?: ToolCallRequest[];
-
     // 后续可追加 meta 信息，如消耗 token 数等
     usage?: {
         promptTokens: number;
         completionTokens: number;
         totalTokens: number;
     };
+}
+
+/**
+ * 模型的元计算配置信息
+ */
+export interface ModelConfig {
+    /** 模型的绝对最大上下文窗口长度 (如 128000) */
+    contextWindow: number;
+    /** 为模型生成预留的安全输出空间 (如 4096) */
+    maxOutputTokens: number;
+    /** 算法允许的安全偏移量 (如 1000) */
+    safetyBuffer?: number;
 }
